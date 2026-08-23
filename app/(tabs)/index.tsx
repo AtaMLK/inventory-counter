@@ -18,6 +18,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { InventoryItemRow } from "@/components/inventory/InventoryItemRow";
 import {
   completeInventorySession,
   findProductByBarcode,
@@ -30,7 +31,6 @@ import {
   type InventorySession,
   type Product,
 } from "@/database/database";
-import { InventoryItemRow } from "@/components/inventory/InventoryItemRow";
 
 type ScanMode = "scan" | "ocr" | "search";
 
@@ -58,8 +58,7 @@ export default function HomeScreen() {
   const locked = session?.status !== "in_progress";
 
   useEffect(() => {
-    loadSession();
-
+    void loadSession();
     return () => {
       if (cameraTimer.current) clearTimeout(cameraTimer.current);
     };
@@ -81,9 +80,7 @@ export default function HomeScreen() {
 
   async function refreshItems(sessionId = session?.id) {
     if (!sessionId) return;
-
     const rows = await getSessionCounts(sessionId);
-
     const countedRows = rows
       .filter((row) => row.updatedAt !== null)
       .sort((a, b) => {
@@ -91,13 +88,11 @@ export default function HomeScreen() {
         const bTime = b.updatedAt ? Date.parse(b.updatedAt) : 0;
         return aTime - bTime;
       });
-
     setItems(countedRows);
   }
 
   async function handleRefresh() {
     if (!session) return;
-
     try {
       setRefreshing(true);
       await refreshItems(session.id);
@@ -110,9 +105,7 @@ export default function HomeScreen() {
 
   function restartCameraAfterScan() {
     if (cameraTimer.current) clearTimeout(cameraTimer.current);
-
     setCameraActive(false);
-
     cameraTimer.current = setTimeout(() => {
       setCameraActive(true);
       cameraTimer.current = null;
@@ -120,9 +113,7 @@ export default function HomeScreen() {
   }
 
   async function handleBarcodeScanned({ data }: { data: string }) {
-    if (scanMode !== "scan" || locked || !session || scanLock.current) {
-      return;
-    }
+    if (scanMode !== "scan" || locked || !session || scanLock.current) return;
 
     scanLock.current = true;
     restartCameraAfterScan();
@@ -165,9 +156,7 @@ export default function HomeScreen() {
 
   async function changeQuantity(item: InventoryCountRow, delta: number) {
     if (!session || locked) return;
-
     const nextQuantity = Math.max(0, item.quantity + delta);
-
     try {
       await saveProductCount(session.id, item.productId, nextQuantity);
       await refreshItems(session.id);
@@ -185,17 +174,11 @@ export default function HomeScreen() {
 
   async function saveEditedQuantity() {
     if (!session || !quantityItem || locked) return;
-
     const value = Number(quantityInput);
-
     if (!Number.isInteger(value) || value < 0) {
-      Alert.alert(
-        "Invalid Quantity",
-        "Enter a whole number greater than or equal to 0.",
-      );
+      Alert.alert("Invalid Quantity", "Enter a whole number greater than or equal to 0.");
       return;
     }
-
     try {
       setSavingQuantity(true);
       await saveProductCount(session.id, quantityItem.productId, value);
@@ -211,21 +194,19 @@ export default function HomeScreen() {
 
   function openSearch() {
     setScanMode("search");
+    setCameraActive(false);
     setSearchVisible(true);
   }
 
   async function runSearch(query: string) {
     setSearchQuery(query);
-
     if (!query.trim()) {
       setSearchResults([]);
       return;
     }
-
     try {
       setSearchLoading(true);
-      const results = await searchProducts(query);
-      setSearchResults(results);
+      setSearchResults(await searchProducts(query));
     } catch (error) {
       console.error("Product search failed:", error);
       Alert.alert("Search Error", "Could not search products.");
@@ -236,7 +217,6 @@ export default function HomeScreen() {
 
   async function addProductFromSearch(product: Product) {
     if (!session || locked) return;
-
     try {
       await incrementProductCount(session.id, product.id);
       await refreshItems(session.id);
@@ -249,6 +229,14 @@ export default function HomeScreen() {
       console.error("Failed to add product:", error);
       Alert.alert("Error", "Could not add the product.");
     }
+  }
+
+  function closeSearch() {
+    setSearchVisible(false);
+    setSearchQuery("");
+    setSearchResults([]);
+    setScanMode("scan");
+    setCameraActive(true);
   }
 
   function openOcr() {
@@ -276,15 +264,10 @@ export default function HomeScreen() {
             try {
               await completeInventorySession(session.id);
               setCameraActive(false);
-              setSession({
-                ...session,
-                status: "completed",
-                finishedAt: new Date().toISOString(),
-              });
-
+              setSession({ ...session, status: "completed", finishedAt: new Date().toISOString() });
               Alert.alert(
                 "Inventory Completed",
-                `${session.name} is now locked. You can export it from Archive and review the completed inventory there.`,
+                `${session.name} is now locked. Export it from Archive when you are ready.`,
                 [
                   { text: "Stay Here", style: "cancel" },
                   { text: "Open Archive", onPress: () => router.push("/archive") },
@@ -306,80 +289,6 @@ export default function HomeScreen() {
       { text: "Archive", onPress: () => router.push("/archive") },
       { text: "Cancel", style: "cancel" },
     ]);
-  }
-
-  function renderHeader() {
-    return (
-      <View>
-        <View style={styles.cameraCard}>
-          <CameraView
-            style={StyleSheet.absoluteFillObject}
-            facing="back"
-            active={cameraActive && scanMode === "scan" && !locked}
-            zoom={zoom}
-            barcodeScannerSettings={{
-              barcodeTypes: ["ean13", "ean8", "code128", "code39", "upc_a", "upc_e"],
-            }}
-            onBarcodeScanned={
-              cameraActive && scanMode === "scan" && !locked
-                ? handleBarcodeScanned
-                : undefined
-            }
-          />
-
-          <View style={styles.cameraShade} />
-          <View style={styles.scanFrame} />
-
-          <View style={styles.zoomControl}>
-            {[0, 0.5, 1].map((value, index) => (
-              <TouchableOpacity
-                key={value}
-                style={[styles.zoomButton, zoom === value && styles.zoomButtonActive]}
-                onPress={() => setZoom(value)}
-              >
-                <Text style={[styles.zoomText, zoom === value && styles.zoomTextActive]}>
-                  {index === 0 ? "1x" : index === 1 ? "1.5x" : "2x"}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
-        <View style={styles.modeRow}>
-          <TouchableOpacity
-            style={[styles.modeButton, scanMode === "scan" && styles.modeButtonActive]}
-            onPress={() => { setScanMode("scan"); setCameraActive(true); }}
-            disabled={locked}
-          >
-            <Ionicons name="scan-outline" size={24} color={scanMode === "scan" ? "#70e884" : "#e7e7e7"} />
-            <Text style={[styles.modeText, scanMode === "scan" && styles.modeTextActive]}>SCAN</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.modeButton, scanMode === "ocr" && styles.modeButtonActive]}
-            onPress={openOcr}
-            disabled={locked}
-          >
-            <Ionicons name="scan-circle-outline" size={24} color="#e7e7e7" />
-            <Text style={styles.modeText}>OCR</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.modeButton, scanMode === "search" && styles.modeButtonActive]}
-            onPress={openSearch}
-            disabled={locked}
-          >
-            <Ionicons name="search-outline" size={24} color="#e7e7e7" />
-            <Text style={styles.modeText}>SEARCH</Text>
-          </TouchableOpacity>
-        </View>
-
-        <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Items Added ({items.length})</Text>
-          <Text style={styles.sectionHint}>Newest items appear below</Text>
-        </View>
-      </View>
-    );
   }
 
   if (loading || !permission) {
@@ -413,12 +322,10 @@ export default function HomeScreen() {
         <TouchableOpacity style={styles.iconButton} onPress={openMenu}>
           <Ionicons name="menu-outline" size={27} color="#f5f5f5" />
         </TouchableOpacity>
-
         <View style={styles.titleBlock}>
           <Text style={styles.header}>INVENTORY COUNTER</Text>
           <Text style={styles.sessionName}>{session?.name}</Text>
         </View>
-
         <View style={styles.topActions}>
           <TouchableOpacity style={styles.iconButton} onPress={() => router.push("/archive")}>
             <Ionicons name="calendar-outline" size={24} color="#f5f5f5" />
@@ -436,7 +343,50 @@ export default function HomeScreen() {
         </View>
       )}
 
+      <View style={styles.cameraSection}>
+        <View style={styles.cameraCard}>
+          <CameraView
+            style={StyleSheet.absoluteFillObject}
+            facing="back"
+            active={cameraActive && scanMode === "scan" && !locked}
+            zoom={zoom}
+            barcodeScannerSettings={{ barcodeTypes: ["ean13", "ean8", "code128", "code39", "upc_a", "upc_e"] }}
+            onBarcodeScanned={cameraActive && scanMode === "scan" && !locked ? handleBarcodeScanned : undefined}
+          />
+          <View style={styles.cameraShade} />
+          <View style={styles.scanFrame} />
+          <View style={styles.zoomControl}>
+            {[0, 0.5, 1].map((value, index) => (
+              <TouchableOpacity key={value} style={[styles.zoomButton, zoom === value && styles.zoomButtonActive]} onPress={() => setZoom(value)}>
+                <Text style={[styles.zoomText, zoom === value && styles.zoomTextActive]}>{index === 0 ? "1x" : index === 1 ? "1.5x" : "2x"}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </View>
+
+        <View style={styles.modeRow}>
+          <TouchableOpacity style={[styles.modeButton, scanMode === "scan" && styles.modeButtonActive]} onPress={() => { setScanMode("scan"); setCameraActive(true); }} disabled={locked}>
+            <Ionicons name="scan-outline" size={24} color={scanMode === "scan" ? "#70e884" : "#e7e7e7"} />
+            <Text style={[styles.modeText, scanMode === "scan" && styles.modeTextActive]}>SCAN</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.modeButton, scanMode === "ocr" && styles.modeButtonActive]} onPress={openOcr} disabled={locked}>
+            <Ionicons name="scan-circle-outline" size={24} color="#e7e7e7" />
+            <Text style={styles.modeText}>OCR</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[styles.modeButton, scanMode === "search" && styles.modeButtonActive]} onPress={openSearch} disabled={locked}>
+            <Ionicons name="search-outline" size={24} color="#e7e7e7" />
+            <Text style={styles.modeText}>SEARCH</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle}>Items Added ({items.length})</Text>
+        <Text style={styles.sectionHint}>Newest items appear below</Text>
+      </View>
+
       <FlatList
+        style={styles.itemList}
         data={items}
         keyExtractor={(item) => item.barcode}
         renderItem={({ item, index }) => (
@@ -444,12 +394,11 @@ export default function HomeScreen() {
             item={item}
             index={index}
             locked={locked}
-            onDecrease={() => changeQuantity(item, -1)}
-            onIncrease={() => changeQuantity(item, 1)}
+            onDecrease={() => void changeQuantity(item, -1)}
+            onIncrease={() => void changeQuantity(item, 1)}
             onSetQuantity={() => openQuantityEditor(item)}
           />
         )}
-        ListHeaderComponent={renderHeader}
         ListEmptyComponent={
           <View style={styles.emptyState}>
             <Ionicons name="cube-outline" size={34} color="#4d4d4d" />
@@ -461,20 +410,13 @@ export default function HomeScreen() {
           <View style={styles.footer}>
             {!locked && (
               <TouchableOpacity style={styles.manualButton} onPress={openSearch}>
-                <Ionicons name="add" size={24} color="#071009" />
+                <Ionicons name="add" size={22} color="#071009" />
                 <Text style={styles.manualButtonText}>ADD MANUALLY</Text>
               </TouchableOpacity>
             )}
-
-            <TouchableOpacity
-              style={[styles.completeButton, locked && styles.completeButtonDisabled]}
-              onPress={handleCompleteInventory}
-              disabled={locked}
-            >
+            <TouchableOpacity style={[styles.completeButton, locked && styles.completeButtonDisabled]} onPress={handleCompleteInventory} disabled={locked}>
               <Ionicons name={locked ? "lock-closed-outline" : "checkmark-circle-outline"} size={21} color={locked ? "#686868" : "#f4f4f4"} />
-              <Text style={[styles.completeButtonText, locked && styles.completeButtonTextDisabled]}>
-                {locked ? "INVENTORY COMPLETED" : "COMPLETE INVENTORY"}
-              </Text>
+              <Text style={[styles.completeButtonText, locked && styles.completeButtonTextDisabled]}>{locked ? "INVENTORY COMPLETED" : "COMPLETE INVENTORY"}</Text>
             </TouchableOpacity>
           </View>
         }
@@ -490,18 +432,14 @@ export default function HomeScreen() {
             <Text style={styles.modalSubtitle} numberOfLines={1}>{quantityItem?.productName || quantityItem?.barcode}</Text>
             <TextInput value={quantityInput} onChangeText={setQuantityInput} keyboardType="number-pad" autoFocus selectTextOnFocus style={styles.quantityInput} />
             <View style={styles.modalActions}>
-              <TouchableOpacity style={styles.modalCancel} onPress={() => setQuantityItem(null)} disabled={savingQuantity}>
-                <Text style={styles.modalCancelText}>CANCEL</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.modalSave} onPress={saveEditedQuantity} disabled={savingQuantity}>
-                <Text style={styles.modalSaveText}>{savingQuantity ? "SAVING..." : "SAVE"}</Text>
-              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalCancel} onPress={() => setQuantityItem(null)} disabled={savingQuantity}><Text style={styles.modalCancelText}>CANCEL</Text></TouchableOpacity>
+              <TouchableOpacity style={styles.modalSave} onPress={saveEditedQuantity} disabled={savingQuantity}><Text style={styles.modalSaveText}>{savingQuantity ? "SAVING..." : "SAVE"}</Text></TouchableOpacity>
             </View>
           </View>
         </KeyboardAvoidingView>
       </Modal>
 
-      <Modal visible={searchVisible} transparent animationType="slide" onRequestClose={() => { setSearchVisible(false); setScanMode("scan"); setCameraActive(true); }}>
+      <Modal visible={searchVisible} transparent animationType="slide" onRequestClose={closeSearch}>
         <KeyboardAvoidingView style={styles.searchBackdrop} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.searchSheet}>
             <View style={styles.searchHeader}>
@@ -509,18 +447,13 @@ export default function HomeScreen() {
                 <Text style={styles.modalTitle}>Find Product</Text>
                 <Text style={styles.modalSubtitle}>Code, name, or barcode</Text>
               </View>
-              <TouchableOpacity style={styles.closeButton} onPress={() => { setSearchVisible(false); setScanMode("scan"); setCameraActive(true); }}>
-                <Ionicons name="close" size={24} color="#f2f2f2" />
-              </TouchableOpacity>
+              <TouchableOpacity style={styles.closeButton} onPress={closeSearch}><Ionicons name="close" size={24} color="#f2f2f2" /></TouchableOpacity>
             </View>
             <TextInput value={searchQuery} onChangeText={(value) => void runSearch(value)} placeholder="Search products..." placeholderTextColor="#666" autoFocus style={styles.searchInput} />
             {searchLoading ? (
               <View style={styles.searchEmpty}><Text style={styles.searchEmptyText}>Searching...</Text></View>
             ) : searchResults.length === 0 ? (
-              <View style={styles.searchEmpty}>
-                <Ionicons name="search-outline" size={30} color="#555" />
-                <Text style={styles.searchEmptyText}>{searchQuery ? "No matching products" : "Start typing to search"}</Text>
-              </View>
+              <View style={styles.searchEmpty}><Ionicons name="search-outline" size={30} color="#555" /><Text style={styles.searchEmptyText}>{searchQuery ? "No matching products" : "Start typing to search"}</Text></View>
             ) : (
               <FlatList
                 data={searchResults}
@@ -557,8 +490,8 @@ const styles = StyleSheet.create({
   topActions: { flexDirection: "row" },
   lockedBanner: { marginHorizontal: 14, marginBottom: 8, paddingVertical: 8, borderRadius: 10, backgroundColor: "#241616", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6 },
   lockedText: { color: "#ff8b8b", fontSize: 11, fontWeight: "800", letterSpacing: 1 },
-  listContent: { paddingBottom: 28 },
-  cameraCard: { height: 315, marginHorizontal: 14, borderRadius: 18, overflow: "hidden", backgroundColor: "#171717", borderWidth: 1, borderColor: "#252525" },
+  cameraSection: { flexShrink: 0 },
+  cameraCard: { height: 250, marginHorizontal: 14, borderRadius: 18, overflow: "hidden", backgroundColor: "#171717", borderWidth: 1, borderColor: "#252525" },
   cameraShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.16)" },
   scanFrame: { position: "absolute", left: "12%", right: "12%", top: "28%", height: "40%", borderWidth: 2, borderColor: "rgba(255,255,255,0.9)", borderRadius: 14 },
   zoomControl: { position: "absolute", bottom: 10, alignSelf: "center", flexDirection: "row", padding: 3, borderRadius: 10, backgroundColor: "rgba(0,0,0,0.72)" },
@@ -566,23 +499,25 @@ const styles = StyleSheet.create({
   zoomButtonActive: { backgroundColor: "#17261b" },
   zoomText: { color: "#d8d8d8", fontSize: 13, fontWeight: "700" },
   zoomTextActive: { color: "#70e884" },
-  modeRow: { marginHorizontal: 14, marginTop: 10, flexDirection: "row", gap: 8 },
-  modeButton: { flex: 1, minHeight: 62, borderRadius: 13, backgroundColor: "#171717", borderWidth: 1, borderColor: "#242424", alignItems: "center", justifyContent: "center", gap: 3 },
+  modeRow: { marginHorizontal: 14, marginTop: 8, flexDirection: "row", gap: 8 },
+  modeButton: { flex: 1, minHeight: 54, borderRadius: 12, backgroundColor: "#171717", borderWidth: 1, borderColor: "#242424", alignItems: "center", justifyContent: "center", gap: 2 },
   modeButtonActive: { backgroundColor: "#142219", borderColor: "#294d31" },
-  modeText: { color: "#e7e7e7", fontSize: 12, fontWeight: "700", letterSpacing: 0.5 },
+  modeText: { color: "#e7e7e7", fontSize: 11, fontWeight: "700", letterSpacing: 0.5 },
   modeTextActive: { color: "#70e884" },
-  sectionHeader: { marginHorizontal: 14, marginTop: 18, marginBottom: 10, paddingHorizontal: 4, flexDirection: "row", alignItems: "baseline", justifyContent: "space-between" },
-  sectionTitle: { color: "#f5f5f5", fontSize: 20, fontWeight: "800" },
-  sectionHint: { color: "#5d5d5d", fontSize: 11 },
-  emptyState: { marginHorizontal: 14, minHeight: 150, borderRadius: 16, borderWidth: 1, borderColor: "#202020", backgroundColor: "#111", alignItems: "center", justifyContent: "center", padding: 20 },
-  emptyTitle: { color: "#cfcfcf", fontSize: 16, fontWeight: "700", marginTop: 9 },
-  emptyText: { color: "#666", textAlign: "center", fontSize: 13, marginTop: 5 },
+  sectionHeader: { marginHorizontal: 14, marginTop: 10, marginBottom: 6, paddingHorizontal: 4, flexDirection: "row", alignItems: "baseline", justifyContent: "space-between" },
+  sectionTitle: { color: "#f5f5f5", fontSize: 18, fontWeight: "800" },
+  sectionHint: { color: "#5d5d5d", fontSize: 10 },
+  itemList: { flex: 1 },
+  listContent: { paddingBottom: 20 },
+  emptyState: { marginHorizontal: 14, minHeight: 100, borderRadius: 14, borderWidth: 1, borderColor: "#202020", backgroundColor: "#111", alignItems: "center", justifyContent: "center", padding: 15 },
+  emptyTitle: { color: "#cfcfcf", fontSize: 15, fontWeight: "700", marginTop: 7 },
+  emptyText: { color: "#666", textAlign: "center", fontSize: 12, marginTop: 4 },
   footer: { marginTop: 5, paddingHorizontal: 14 },
-  manualButton: { minHeight: 56, borderRadius: 13, backgroundColor: "#45c65a", alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8 },
-  manualButtonText: { color: "#071009", fontSize: 16, fontWeight: "900", letterSpacing: 0.4 },
-  completeButton: { minHeight: 52, marginTop: 10, borderRadius: 13, backgroundColor: "#242424", borderWidth: 1, borderColor: "#383838", alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8 },
+  manualButton: { minHeight: 48, borderRadius: 11, backgroundColor: "#45c65a", alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 7 },
+  manualButtonText: { color: "#071009", fontSize: 14, fontWeight: "900", letterSpacing: 0.4 },
+  completeButton: { minHeight: 46, marginTop: 8, borderRadius: 11, backgroundColor: "#242424", borderWidth: 1, borderColor: "#383838", alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 8 },
   completeButtonDisabled: { backgroundColor: "#171717", borderColor: "#242424" },
-  completeButtonText: { color: "#f4f4f4", fontSize: 14, fontWeight: "800", letterSpacing: 0.4 },
+  completeButtonText: { color: "#f4f4f4", fontSize: 13, fontWeight: "800", letterSpacing: 0.4 },
   completeButtonTextDisabled: { color: "#686868" },
   permissionTitle: { color: "#fff", fontSize: 24, fontWeight: "800", marginTop: 15 },
   permissionText: { color: "#777", textAlign: "center", lineHeight: 21, marginTop: 9, marginBottom: 22 },
