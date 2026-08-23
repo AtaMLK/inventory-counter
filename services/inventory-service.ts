@@ -3,6 +3,7 @@ import {
   findProductByBarcode,
   getOrCreateCurrentMonthSession,
   getProductCount,
+  incrementProductCount,
   saveProductCount,
 } from "@/database/database";
 
@@ -23,14 +24,8 @@ export async function lookupProduct(barcode: string): Promise<Product | null> {
   return findProductByBarcode(normalized);
 }
 
-export async function incrementProduct(
-  sessionId: number,
-  productId: number,
-): Promise<number> {
-  const current = await getProductCount(sessionId, productId);
-  const next = current + 1;
-  await saveProductCount(sessionId, productId, next);
-  return next;
+export async function incrementProduct(sessionId: number, productId: number): Promise<number> {
+  return incrementProductCount(sessionId, productId);
 }
 
 export async function setProductQuantity(
@@ -46,10 +41,7 @@ export async function setProductQuantity(
   return quantity;
 }
 
-export async function decrementProduct(
-  sessionId: number,
-  productId: number,
-): Promise<number> {
+export async function decrementProduct(sessionId: number, productId: number): Promise<number> {
   const current = await getProductCount(sessionId, productId);
   const next = Math.max(0, current - 1);
   await saveProductCount(sessionId, productId, next);
