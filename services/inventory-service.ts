@@ -9,7 +9,12 @@ import {
 import type { InventorySession, Product } from "@/types/inventory";
 
 export async function getCurrentInventory(): Promise<InventorySession> {
-  return getOrCreateCurrentMonthSession();
+  const session = await getOrCreateCurrentMonthSession();
+
+  return {
+    ...session,
+    status: session.status === "completed" ? "completed" : "in_progress",
+  };
 }
 
 export async function lookupProduct(barcode: string): Promise<Product | null> {
