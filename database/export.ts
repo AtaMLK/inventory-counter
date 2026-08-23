@@ -2,13 +2,11 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as XLSX from 'xlsx';
 
-import {
-  getSessionCounts,
-} from '@/database/database';
+import { getSessionCounts } from '@/database/database';
 
 export async function exportInventoryToExcel(
   sessionId: number,
-  sessionName: string
+  sessionName: string,
 ) {
   const rows = await getSessionCounts(sessionId);
 
@@ -17,23 +15,30 @@ export async function exportInventoryToExcel(
     'Product Name': row.productName,
     Barcode: row.barcode,
     Quantity: row.quantity,
-    'Count Date': new Date(
-      row.updatedAt
-    ).toLocaleDateString(),
-    'Count Time': new Date(
-      row.updatedAt
-    ).toLocaleTimeString(),
+    'Count Date': row.updatedAt
+      ? new Date(row.updatedAt).toLocaleDateString()
+      : '',
+    'Count Time': row.updatedAt
+      ? new Date(row.updatedAt).toLocaleTimeString()
+      : '',
   }));
 
-  const worksheet =
-    XLSX.utils.json_to_sheet(exportRows);
+  const worksheet = XLSX.utils.json_to_sheet(exportRows);
+  worksheet['!cols'] = [
+    { wch: 18 },
+    { wch: 30 },
+    { wch: 18 },
+    { wch: 12 },
+    { wch: 14 },
+    { wch: 14 },
+  ];
 
   const workbook = XLSX.utils.book_new();
 
   XLSX.utils.book_append_sheet(
     workbook,
     worksheet,
-    'Inventory'
+    'Inventory',
   );
 
   const base64 = XLSX.write(workbook, {
@@ -41,29 +46,23 @@ export async function exportInventoryToExcel(
     bookType: 'xlsx',
   });
 
-  const safeSessionName =
-    sessionName.replace(/[^a-zA-Z0-9-_]/g, '_');
-
-  const fileName =
-    `inventory-${safeSessionName}.xlsx`;
-
-  const fileUri =
-    `${FileSystem.cacheDirectory}${fileName}`;
-
-  await FileSystem.writeAsStringAsync(
-    fileUri,
-    base64,
-    {
-      encoding: FileSystem.EncodingType.Base64,
-    }
+  const safeSessionName = sessionName.replace(
+    /[^a-zA-Z0-9-_]/g,
+    '_',
   );
 
-  const canShare =
-    await Sharing.isAvailableAsync();
+  const fileName = `inventory-${safeSessionName}.xlsx`;
+  const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
+
+  await FileSystem.writeAsStringAsync(fileUri, base64, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+
+  const canShare = await Sharing.isAvailableAsync();
 
   if (!canShare) {
     throw new Error(
-      'File sharing is not available on this device.'
+      'File sharing is not available on this device.',
     );
   }
 
@@ -71,8 +70,7 @@ export async function exportInventoryToExcel(
     mimeType:
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     dialogTitle: `Share ${fileName}`,
-    UTI:
-      'com.microsoft.excel.xlsx',
+    UTI: 'com.microsoft.excel.xlsx',
   });
 
   return fileUri;
