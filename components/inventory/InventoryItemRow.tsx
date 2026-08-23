@@ -47,7 +47,7 @@ export function InventoryItemRow({
         disabled={locked || item.quantity === 0}
         accessibilityLabel={`Decrease ${primaryLabel}`}
       >
-        <Ionicons name="remove" size={20} color={locked || item.quantity === 0 ? "#4b4b4b" : "#f2f2f2"} />
+        <Ionicons name="remove" size={17} color={locked || item.quantity === 0 ? "#4b4b4b" : "#f2f2f2"} />
       </TouchableOpacity>
 
       <TouchableOpacity
@@ -64,7 +64,7 @@ export function InventoryItemRow({
         disabled={locked}
         accessibilityLabel={`Increase ${primaryLabel}`}
       >
-        <Ionicons name="add" size={21} color={locked ? "#4b4b4b" : "#79e58b"} />
+        <Ionicons name="add" size={18} color={locked ? "#4b4b4b" : "#79e58b"} />
       </TouchableOpacity>
     </View>
   );
@@ -72,12 +72,12 @@ export function InventoryItemRow({
 
 const styles = StyleSheet.create({
   card: {
-    minHeight: 76,
+    minHeight: 48,
     marginHorizontal: 14,
-    marginBottom: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    borderRadius: 14,
+    marginBottom: 5,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: "#292929",
     backgroundColor: "#171717",
@@ -85,31 +85,31 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   index: {
-    width: 28,
-    color: "#7d7d7d",
-    fontSize: 15,
+    width: 23,
+    color: "#666",
+    fontSize: 12,
     fontWeight: "600",
     textAlign: "center",
   },
   info: {
     flex: 1,
     minWidth: 0,
-    marginHorizontal: 8,
+    marginHorizontal: 7,
   },
   name: {
     color: "#f5f5f5",
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: "700",
   },
   secondary: {
-    color: "#888",
-    fontSize: 12,
-    marginTop: 4,
+    color: "#777",
+    fontSize: 10,
+    marginTop: 1,
   },
   adjustButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 10,
+    width: 30,
+    height: 30,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: "#303030",
     backgroundColor: "#222",
@@ -121,14 +121,14 @@ const styles = StyleSheet.create({
     borderColor: "#243a28",
   },
   quantity: {
-    minWidth: 44,
-    paddingHorizontal: 8,
+    minWidth: 34,
+    paddingHorizontal: 5,
     alignItems: "center",
     justifyContent: "center",
   },
   quantityText: {
     color: "#fff",
-    fontSize: 19,
+    fontSize: 16,
     fontWeight: "800",
   },
 });
