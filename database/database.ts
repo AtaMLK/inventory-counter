@@ -68,6 +68,8 @@ export async function initializeDatabase() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
+    CREATE INDEX IF NOT EXISTS idx_products_name ON products(product_name);
+    CREATE INDEX IF NOT EXISTS idx_products_code ON products(product_code);
     CREATE INDEX IF NOT EXISTS idx_counts_session ON counts(session_id);
     CREATE INDEX IF NOT EXISTS idx_counts_product ON counts(product_id);
 
@@ -142,6 +144,45 @@ export async function findProductByBarcode(barcode: string) {
       LIMIT 1
     `,
     barcode.trim(),
+  );
+}
+
+export async function searchProducts(query: string, limit = 20) {
+  const db = await getDatabase();
+  const normalized = query.trim();
+
+  if (!normalized) return [];
+
+  const pattern = `%${normalized}%`;
+
+  return db.getAllAsync<Product>(
+    `
+      SELECT
+        id,
+        product_code AS productCode,
+        product_name AS productName,
+        barcode
+      FROM products
+      WHERE product_code LIKE ?
+         OR product_name LIKE ?
+         OR barcode LIKE ?
+      ORDER BY
+        CASE
+          WHEN barcode = ? THEN 0
+          WHEN product_code = ? THEN 1
+          WHEN product_name = ? THEN 2
+          ELSE 3
+        END,
+        product_code ASC
+      LIMIT ?
+    `,
+    pattern,
+    pattern,
+    pattern,
+    normalized,
+    normalized,
+    normalized,
+    limit,
   );
 }
 
