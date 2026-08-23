@@ -25,22 +25,6 @@ export async function getDatabase() {
   return database;
 }
 
-export async function finishInventorySession(sessionId: number) {
-  const db = await getDatabase();
-
-  await db.runAsync(
-    `
-      UPDATE inventory_sessions
-      SET
-        status = 'completed',
-        finished_at = ?
-      WHERE id = ?
-    `,
-    new Date().toISOString(),
-    sessionId,
-  );
-}
-
 export async function initializeDatabase() {
   const db = await getDatabase();
 
@@ -83,27 +67,24 @@ export async function initializeDatabase() {
 
 export async function getOrCreateCurrentMonthSession() {
   const db = await getDatabase();
-
   const now = new Date();
-
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, "0");
-
   const sessionName = `${year}-${month}`;
 
   const existingSession = await db.getFirstAsync<InventorySession>(
     `
-        SELECT
-          id,
-          name,
-          status,
-          started_at AS startedAt,
-          finished_at AS finishedAt
-        FROM inventory_sessions
-        WHERE name = ?
-        ORDER BY id DESC
-        LIMIT 1
-      `,
+      SELECT
+        id,
+        name,
+        status,
+        started_at AS startedAt,
+        finished_at AS finishedAt
+      FROM inventory_sessions
+      WHERE name = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `,
     sessionName,
   );
 
@@ -133,7 +114,7 @@ export async function getOrCreateCurrentMonthSession() {
     status: "in_progress",
     startedAt,
     finishedAt: null,
-  };
+  } satisfies InventorySession;
 }
 
 export async function findProductByBarcode(barcode: string) {
@@ -157,14 +138,12 @@ export async function findProductByBarcode(barcode: string) {
 export async function getProductCount(sessionId: number, productId: number) {
   const db = await getDatabase();
 
-  const result = await db.getFirstAsync<{
-    quantity: number;
-  }>(
+  const result = await db.getFirstAsync<{ quantity: number }>(
     `
       SELECT quantity
       FROM counts
       WHERE session_id = ?
-      AND product_id = ?
+        AND product_id = ?
       LIMIT 1
     `,
     sessionId,
@@ -179,11 +158,14 @@ export async function saveProductCount(
   productId: number,
   quantity: number,
 ) {
-  const db = await getDatabase();
+  if (!Number.isInteger(quantity) || quantity < 0) {
+    throw new Error("Quantity must be a non-negative whole number.");
+  }
 
+  const db = await getDatabase();
   const now = new Date().toISOString();
 
-  await db.runAsync(
+  const result = await db.runAsync(
     `
       INSERT INTO counts (
         session_id,
@@ -191,8 +173,13 @@ export async function saveProductCount(
         quantity,
         updated_at
       )
-      VALUES (?, ?, ?, ?)
-
+      SELECT ?, ?, ?, ?
+      WHERE EXISTS (
+        SELECT 1
+        FROM inventory_sessions
+        WHERE id = ?
+          AND status = 'in_progress'
+      )
       ON CONFLICT(session_id, product_id)
       DO UPDATE SET
         quantity = excluded.quantity,
@@ -202,8 +189,14 @@ export async function saveProductCount(
     productId,
     quantity,
     now,
+    sessionId,
   );
+
+  if (result.changes === 0) {
+    throw new Error("This inventory session is locked or does not exist.");
+  }
 }
+
 export async function getInventorySessions() {
   const db = await getDatabase();
 
@@ -220,12 +213,13 @@ export async function getInventorySessions() {
     `,
   );
 }
+
 export type InventoryCountRow = {
   productCode: string;
   productName: string;
   barcode: string;
   quantity: number;
-  updatedAt: string;
+  updatedAt: string | null;
 };
 
 export async function getSessionCounts(sessionId: number) {
@@ -237,12 +231,12 @@ export async function getSessionCounts(sessionId: number) {
         p.product_code AS productCode,
         p.product_name AS productName,
         p.barcode AS barcode,
-        c.quantity AS quantity,
+        COALESCE(c.quantity, 0) AS quantity,
         c.updated_at AS updatedAt
-      FROM counts c
-      INNER JOIN products p
-        ON p.id = c.product_id
-      WHERE c.session_id = ?
+      FROM products p
+      LEFT JOIN counts c
+        ON c.product_id = p.id
+        AND c.session_id = ?
       ORDER BY p.product_code ASC
     `,
     sessionId,
@@ -252,20 +246,23 @@ export async function getSessionCounts(sessionId: number) {
 export async function completeInventorySession(sessionId: number) {
   const db = await getDatabase();
 
-  await db.runAsync(
+  const result = await db.runAsync(
     `
       UPDATE inventory_sessions
       SET
         status = 'completed',
         finished_at = ?
       WHERE id = ?
-      AND status = 'in_progress'
+        AND status = 'in_progress'
     `,
     new Date().toISOString(),
     sessionId,
   );
-}
 
+  if (result.changes === 0) {
+    throw new Error("This inventory session is already completed or does not exist.");
+  }
+}
 
 export async function getCompletedSessions() {
   const db = await getDatabase();
@@ -284,6 +281,7 @@ export async function getCompletedSessions() {
     `,
   );
 }
+
 export async function importProducts(
   products: {
     productCode: string;
@@ -295,6 +293,26 @@ export async function importProducts(
 
   await db.withTransactionAsync(async () => {
     for (const product of products) {
+      const existingBarcodeOwner = await db.getFirstAsync<{
+        productCode: string;
+      }>(
+        `
+          SELECT product_code AS productCode
+          FROM products
+          WHERE barcode = ?
+            AND product_code <> ?
+          LIMIT 1
+        `,
+        product.barcode,
+        product.productCode,
+      );
+
+      if (existingBarcodeOwner) {
+        throw new Error(
+          `Barcode ${product.barcode} is already assigned to product ${existingBarcodeOwner.productCode}.`,
+        );
+      }
+
       await db.runAsync(
         `
           INSERT INTO products (
