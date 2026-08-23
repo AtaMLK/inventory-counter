@@ -16,6 +16,7 @@ export type InventorySession = {
 };
 
 export type InventoryCountRow = {
+  productId: number;
   productCode: string;
   productName: string;
   barcode: string;
@@ -265,6 +266,7 @@ export async function getSessionCounts(sessionId: number) {
   return db.getAllAsync<InventoryCountRow>(
     `
       SELECT
+        p.id AS productId,
         p.product_code AS productCode,
         p.product_name AS productName,
         p.barcode AS barcode,
