@@ -1,0 +1,319 @@
+import * as SQLite from "expo-sqlite";
+
+let database: SQLite.SQLiteDatabase | null = null;
+
+export type Product = {
+  id: number;
+  productCode: string;
+  productName: string;
+  barcode: string;
+};
+
+export type InventorySession = {
+  id: number;
+  name: string;
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+};
+
+export async function getDatabase() {
+  if (!database) {
+    database = await SQLite.openDatabaseAsync("inventory.db");
+  }
+
+  return database;
+}
+
+export async function finishInventorySession(sessionId: number) {
+  const db = await getDatabase();
+
+  await db.runAsync(
+    `
+      UPDATE inventory_sessions
+      SET
+        status = 'completed',
+        finished_at = ?
+      WHERE id = ?
+    `,
+    new Date().toISOString(),
+    sessionId,
+  );
+}
+
+export async function initializeDatabase() {
+  const db = await getDatabase();
+
+  await db.execAsync(`
+    PRAGMA journal_mode = WAL;
+
+    CREATE TABLE IF NOT EXISTS products (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_code TEXT NOT NULL UNIQUE,
+      product_name TEXT NOT NULL,
+      barcode TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS inventory_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS counts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      quantity INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+
+      UNIQUE(session_id, product_id),
+
+      FOREIGN KEY (session_id)
+        REFERENCES inventory_sessions(id),
+
+      FOREIGN KEY (product_id)
+        REFERENCES products(id)
+    );
+  `);
+}
+
+export async function getOrCreateCurrentMonthSession() {
+  const db = await getDatabase();
+
+  const now = new Date();
+
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+
+  const sessionName = `${year}-${month}`;
+
+  const existingSession = await db.getFirstAsync<InventorySession>(
+    `
+        SELECT
+          id,
+          name,
+          status,
+          started_at AS startedAt,
+          finished_at AS finishedAt
+        FROM inventory_sessions
+        WHERE name = ?
+        ORDER BY id DESC
+        LIMIT 1
+      `,
+    sessionName,
+  );
+
+  if (existingSession) {
+    return existingSession;
+  }
+
+  const startedAt = now.toISOString();
+
+  const result = await db.runAsync(
+    `
+      INSERT INTO inventory_sessions (
+        name,
+        status,
+        started_at
+      )
+      VALUES (?, ?, ?)
+    `,
+    sessionName,
+    "in_progress",
+    startedAt,
+  );
+
+  return {
+    id: result.lastInsertRowId,
+    name: sessionName,
+    status: "in_progress",
+    startedAt,
+    finishedAt: null,
+  };
+}
+
+export async function findProductByBarcode(barcode: string) {
+  const db = await getDatabase();
+
+  return db.getFirstAsync<Product>(
+    `
+      SELECT
+        id,
+        product_code AS productCode,
+        product_name AS productName,
+        barcode
+      FROM products
+      WHERE barcode = ?
+      LIMIT 1
+    `,
+    barcode,
+  );
+}
+
+export async function getProductCount(sessionId: number, productId: number) {
+  const db = await getDatabase();
+
+  const result = await db.getFirstAsync<{
+    quantity: number;
+  }>(
+    `
+      SELECT quantity
+      FROM counts
+      WHERE session_id = ?
+      AND product_id = ?
+      LIMIT 1
+    `,
+    sessionId,
+    productId,
+  );
+
+  return result?.quantity ?? 0;
+}
+
+export async function saveProductCount(
+  sessionId: number,
+  productId: number,
+  quantity: number,
+) {
+  const db = await getDatabase();
+
+  const now = new Date().toISOString();
+
+  await db.runAsync(
+    `
+      INSERT INTO counts (
+        session_id,
+        product_id,
+        quantity,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?)
+
+      ON CONFLICT(session_id, product_id)
+      DO UPDATE SET
+        quantity = excluded.quantity,
+        updated_at = excluded.updated_at
+    `,
+    sessionId,
+    productId,
+    quantity,
+    now,
+  );
+}
+export async function getInventorySessions() {
+  const db = await getDatabase();
+
+  return db.getAllAsync<InventorySession>(
+    `
+      SELECT
+        id,
+        name,
+        status,
+        started_at AS startedAt,
+        finished_at AS finishedAt
+      FROM inventory_sessions
+      ORDER BY started_at DESC
+    `,
+  );
+}
+export type InventoryCountRow = {
+  productCode: string;
+  productName: string;
+  barcode: string;
+  quantity: number;
+  updatedAt: string;
+};
+
+export async function getSessionCounts(sessionId: number) {
+  const db = await getDatabase();
+
+  return db.getAllAsync<InventoryCountRow>(
+    `
+      SELECT
+        p.product_code AS productCode,
+        p.product_name AS productName,
+        p.barcode AS barcode,
+        c.quantity AS quantity,
+        c.updated_at AS updatedAt
+      FROM counts c
+      INNER JOIN products p
+        ON p.id = c.product_id
+      WHERE c.session_id = ?
+      ORDER BY p.product_code ASC
+    `,
+    sessionId,
+  );
+}
+
+export async function completeInventorySession(sessionId: number) {
+  const db = await getDatabase();
+
+  await db.runAsync(
+    `
+      UPDATE inventory_sessions
+      SET
+        status = 'completed',
+        finished_at = ?
+      WHERE id = ?
+      AND status = 'in_progress'
+    `,
+    new Date().toISOString(),
+    sessionId,
+  );
+}
+
+
+export async function getCompletedSessions() {
+  const db = await getDatabase();
+
+  return db.getAllAsync<InventorySession>(
+    `
+      SELECT
+        id,
+        name,
+        status,
+        started_at AS startedAt,
+        finished_at AS finishedAt
+      FROM inventory_sessions
+      WHERE status = 'completed'
+      ORDER BY finished_at DESC
+    `,
+  );
+}
+export async function importProducts(
+  products: {
+    productCode: string;
+    productName: string;
+    barcode: string;
+  }[],
+) {
+  const db = await getDatabase();
+
+  await db.withTransactionAsync(async () => {
+    for (const product of products) {
+      await db.runAsync(
+        `
+          INSERT INTO products (
+            product_code,
+            product_name,
+            barcode,
+            created_at
+          )
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(product_code)
+          DO UPDATE SET
+            product_name = excluded.product_name,
+            barcode = excluded.barcode
+        `,
+        product.productCode,
+        product.productName,
+        product.barcode,
+        new Date().toISOString(),
+      );
+    }
+  });
+}

@@ -41,3 +41,8 @@ app-example
 # generated native folders
 /ios
 /android
+
+# Local SQLite database
+*.db
+*.db-shm
+*.db-wal
