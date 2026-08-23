@@ -1,9 +1,10 @@
 import { Ionicons } from "@expo/vector-icons";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import { CameraView, useCameraPermissions, type CameraView as CameraViewType } from "expo-camera";
 import { router } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   FlatList,
   KeyboardAvoidingView,
@@ -31,6 +32,7 @@ import {
   type InventorySession,
   type Product,
 } from "@/database/database";
+import { buildOcrCandidates, extractOcrTokens, recognizeImageText } from "@/database/ocr";
 
 type ScanMode = "scan" | "ocr" | "search";
 
@@ -43,6 +45,7 @@ export default function HomeScreen() {
   const [scanMode, setScanMode] = useState<ScanMode>("scan");
   const [zoom, setZoom] = useState(0);
   const [cameraActive, setCameraActive] = useState(true);
+  const [cameraReady, setCameraReady] = useState(false);
 
   const [quantityItem, setQuantityItem] = useState<InventoryCountRow | null>(null);
   const [quantityInput, setQuantityInput] = useState("");
@@ -53,6 +56,12 @@ export default function HomeScreen() {
   const [searchResults, setSearchResults] = useState<Product[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
 
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrText, setOcrText] = useState("");
+  const [ocrResults, setOcrResults] = useState<Product[]>([]);
+  const [ocrVisible, setOcrVisible] = useState(false);
+
+  const cameraRef = useRef<CameraViewType | null>(null);
   const scanLock = useRef(false);
   const cameraTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const locked = session?.status !== "in_progress";
@@ -81,14 +90,15 @@ export default function HomeScreen() {
   async function refreshItems(sessionId = session?.id) {
     if (!sessionId) return;
     const rows = await getSessionCounts(sessionId);
-    const countedRows = rows
-      .filter((row) => row.updatedAt !== null)
-      .sort((a, b) => {
-        const aTime = a.updatedAt ? Date.parse(a.updatedAt) : 0;
-        const bTime = b.updatedAt ? Date.parse(b.updatedAt) : 0;
-        return aTime - bTime;
-      });
-    setItems(countedRows);
+    setItems(
+      rows
+        .filter((row) => row.updatedAt !== null)
+        .sort((a, b) => {
+          const aTime = a.updatedAt ? Date.parse(a.updatedAt) : 0;
+          const bTime = b.updatedAt ? Date.parse(b.updatedAt) : 0;
+          return aTime - bTime;
+        }),
+    );
   }
 
   async function handleRefresh() {
@@ -96,8 +106,6 @@ export default function HomeScreen() {
     try {
       setRefreshing(true);
       await refreshItems(session.id);
-    } catch (error) {
-      console.error("Failed to refresh inventory:", error);
     } finally {
       setRefreshing(false);
     }
@@ -107,6 +115,7 @@ export default function HomeScreen() {
     if (cameraTimer.current) clearTimeout(cameraTimer.current);
     setCameraActive(false);
     cameraTimer.current = setTimeout(() => {
+      setCameraReady(false);
       setCameraActive(true);
       cameraTimer.current = null;
     }, 500);
@@ -114,35 +123,28 @@ export default function HomeScreen() {
 
   async function handleBarcodeScanned({ data }: { data: string }) {
     if (scanMode !== "scan" || locked || !session || scanLock.current) return;
-
     scanLock.current = true;
     restartCameraAfterScan();
 
     try {
       const barcode = data.trim();
-      const foundProduct = await findProductByBarcode(barcode);
-
-      if (!foundProduct) {
-        Alert.alert(
-          "Product Not Found",
-          `No product is registered for barcode ${barcode}.`,
-          [
-            {
-              text: "Search",
-              onPress: () => {
-                setSearchQuery(barcode);
-                setSearchVisible(true);
-                setScanMode("search");
-                void runSearch(barcode);
-              },
+      const product = await findProductByBarcode(barcode);
+      if (!product) {
+        Alert.alert("Product Not Found", `No product is registered for barcode ${barcode}.`, [
+          {
+            text: "Search",
+            onPress: () => {
+              setSearchQuery(barcode);
+              setSearchVisible(true);
+              setScanMode("search");
+              void runSearch(barcode);
             },
-            { text: "Scan Again", style: "cancel" },
-          ],
-        );
+          },
+          { text: "Scan Again", style: "cancel" },
+        ]);
         return;
       }
-
-      await incrementProductCount(session.id, foundProduct.id);
+      await incrementProductCount(session.id, product.id);
       await refreshItems(session.id);
     } catch (error) {
       console.error("Barcode processing failed:", error);
@@ -151,6 +153,84 @@ export default function HomeScreen() {
       setTimeout(() => {
         scanLock.current = false;
       }, 500);
+    }
+  }
+
+  async function captureOcr() {
+    if (!session || locked || ocrBusy || !cameraReady || !cameraRef.current) return;
+
+    try {
+      setOcrBusy(true);
+      const picture = await cameraRef.current.takePictureAsync({ quality: 0.85, skipProcessing: false });
+      if (!picture?.uri) throw new Error("Camera did not return an image.");
+
+      const recognition = await recognizeImageText(picture.uri);
+      const text = recognition.text?.trim() ?? "";
+      setOcrText(text);
+
+      if (!text) {
+        setOcrResults([]);
+        setOcrVisible(true);
+        return;
+      }
+
+      const candidates = buildOcrCandidates(recognition);
+      const tokens = extractOcrTokens(text);
+      const searchTerms = [...tokens, ...candidates.map((candidate) => candidate.value)];
+      const found = new Map<number, Product>();
+      let exactProduct: Product | null = null;
+
+      for (const token of searchTerms.slice(0, 35)) {
+        const barcodeProduct = await findProductByBarcode(token);
+        if (barcodeProduct) {
+          exactProduct = barcodeProduct;
+          found.set(barcodeProduct.id, barcodeProduct);
+          break;
+        }
+
+        const matches = await searchProducts(token, 5);
+        for (const product of matches) {
+          found.set(product.id, product);
+          if (product.productCode.trim().toUpperCase() === token.toUpperCase()) {
+            exactProduct = product;
+          }
+        }
+      }
+
+      const results = [...found.values()].slice(0, 8);
+      setOcrResults(results);
+
+      // Auto-add only an exact barcode/product-code match. A fuzzy name match
+      // is never silently counted because it could be the wrong part.
+      if (exactProduct) {
+        await incrementProductCount(session.id, exactProduct.id);
+        await refreshItems(session.id);
+        setOcrVisible(false);
+        Alert.alert(
+          "OCR Match",
+          `${exactProduct.productCode} • ${exactProduct.productName}\n\nQuantity increased by 1.`,
+          [{ text: "Ready for Next" }],
+        );
+      } else {
+        setOcrVisible(true);
+      }
+    } catch (error) {
+      console.error("OCR failed:", error);
+      Alert.alert("OCR Error", "Could not read the text. Move closer, keep the label flat, and try again.");
+    } finally {
+      setOcrBusy(false);
+    }
+  }
+
+  async function addOcrProduct(product: Product) {
+    if (!session || locked) return;
+    try {
+      await incrementProductCount(session.id, product.id);
+      await refreshItems(session.id);
+      setOcrVisible(false);
+    } catch (error) {
+      console.error("Failed to add OCR product:", error);
+      Alert.alert("Error", "Could not add the product.");
     }
   }
 
@@ -220,11 +300,7 @@ export default function HomeScreen() {
     try {
       await incrementProductCount(session.id, product.id);
       await refreshItems(session.id);
-      setSearchVisible(false);
-      setSearchQuery("");
-      setSearchResults([]);
-      setScanMode("scan");
-      setCameraActive(true);
+      closeSearch();
     } catch (error) {
       console.error("Failed to add product:", error);
       Alert.alert("Error", "Could not add the product.");
@@ -236,22 +312,25 @@ export default function HomeScreen() {
     setSearchQuery("");
     setSearchResults([]);
     setScanMode("scan");
-    setCameraActive(true);
+    setCameraReady(false);
+    setCameraActive(false);
+    setTimeout(() => setCameraActive(true), 250);
   }
 
   function openOcr() {
+    if (locked) return;
+    setSearchVisible(false);
     setScanMode("ocr");
+    setOcrText("");
+    setOcrResults([]);
+    setOcrVisible(false);
+    setCameraReady(false);
     setCameraActive(false);
-    Alert.alert(
-      "OCR",
-      "OCR input is the next functional step. Barcode scanning and manual search are ready now.",
-      [{ text: "Back to Scan", onPress: () => { setScanMode("scan"); setCameraActive(true); } }],
-    );
+    setTimeout(() => setCameraActive(true), 250);
   }
 
   async function handleCompleteInventory() {
     if (!session || locked) return;
-
     Alert.alert(
       "Complete Inventory",
       `Are you sure you want to complete the ${session.name} inventory?\n\nAfter completion, the inventory will be locked and cannot be changed.`,
@@ -314,165 +393,99 @@ export default function HomeScreen() {
     );
   }
 
+  const cameraShouldRun = cameraActive && (scanMode === "scan" || scanMode === "ocr") && !locked;
+
   return (
     <SafeAreaView style={styles.container} edges={["top"]}>
       <StatusBar style="light" />
-
       <View style={styles.topBar}>
-        <TouchableOpacity style={styles.iconButton} onPress={openMenu}>
-          <Ionicons name="menu-outline" size={27} color="#f5f5f5" />
-        </TouchableOpacity>
-        <View style={styles.titleBlock}>
-          <Text style={styles.header}>INVENTORY COUNTER</Text>
-          <Text style={styles.sessionName}>{session?.name}</Text>
-        </View>
+        <TouchableOpacity style={styles.iconButton} onPress={openMenu}><Ionicons name="menu-outline" size={27} color="#f5f5f5" /></TouchableOpacity>
+        <View style={styles.titleBlock}><Text style={styles.header}>INVENTORY COUNTER</Text><Text style={styles.sessionName}>{session?.name}</Text></View>
         <View style={styles.topActions}>
-          <TouchableOpacity style={styles.iconButton} onPress={() => router.push("/archive")}>
-            <Ionicons name="calendar-outline" size={24} color="#f5f5f5" />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.iconButton} onPress={openMenu}>
-            <Ionicons name="ellipsis-vertical" size={23} color="#f5f5f5" />
-          </TouchableOpacity>
+          <TouchableOpacity style={styles.iconButton} onPress={() => router.push("/archive")}><Ionicons name="calendar-outline" size={24} color="#f5f5f5" /></TouchableOpacity>
+          <TouchableOpacity style={styles.iconButton} onPress={openMenu}><Ionicons name="ellipsis-vertical" size={23} color="#f5f5f5" /></TouchableOpacity>
         </View>
       </View>
 
-      {locked && (
-        <View style={styles.lockedBanner}>
-          <Ionicons name="lock-closed" size={14} color="#ff8b8b" />
-          <Text style={styles.lockedText}>COMPLETED • LOCKED</Text>
-        </View>
-      )}
+      {locked && <View style={styles.lockedBanner}><Ionicons name="lock-closed" size={14} color="#ff8b8b" /><Text style={styles.lockedText}>COMPLETED • LOCKED</Text></View>}
 
       <View style={styles.cameraSection}>
         <View style={styles.cameraCard}>
           <CameraView
+            ref={cameraRef}
             style={StyleSheet.absoluteFillObject}
             facing="back"
-            active={cameraActive && scanMode === "scan" && !locked}
+            active={cameraShouldRun}
             zoom={zoom}
+            autofocus="on"
+            onCameraReady={() => setCameraReady(true)}
             barcodeScannerSettings={{ barcodeTypes: ["ean13", "ean8", "code128", "code39", "upc_a", "upc_e"] }}
-            onBarcodeScanned={cameraActive && scanMode === "scan" && !locked ? handleBarcodeScanned : undefined}
+            onBarcodeScanned={cameraShouldRun && scanMode === "scan" ? handleBarcodeScanned : undefined}
           />
           <View style={styles.cameraShade} />
           <View style={styles.scanFrame} />
-          <View style={styles.zoomControl}>
-            {[0, 0.5, 1].map((value, index) => (
-              <TouchableOpacity key={value} style={[styles.zoomButton, zoom === value && styles.zoomButtonActive]} onPress={() => setZoom(value)}>
-                <Text style={[styles.zoomText, zoom === value && styles.zoomTextActive]}>{index === 0 ? "1x" : index === 1 ? "1.5x" : "2x"}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+          <View style={styles.cameraStatus}><Text style={styles.cameraStatusText}>{scanMode === "ocr" ? "OCR • POINT AT PRODUCT LABEL" : "BARCODE READY"}</Text></View>
+          {scanMode === "ocr" ? (
+            <TouchableOpacity style={styles.ocrCaptureButton} onPress={() => void captureOcr()} disabled={ocrBusy || !cameraReady}>
+              {ocrBusy ? <ActivityIndicator color="#071009" /> : <Ionicons name="scan-outline" size={24} color="#071009" />}
+              <Text style={styles.ocrCaptureText}>{ocrBusy ? "READING..." : "CAPTURE & READ"}</Text>
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.zoomControl}>
+              {[0, 0.5, 1].map((value, index) => (
+                <TouchableOpacity key={value} style={[styles.zoomButton, zoom === value && styles.zoomButtonActive]} onPress={() => setZoom(value)}>
+                  <Text style={[styles.zoomText, zoom === value && styles.zoomTextActive]}>{index === 0 ? "1x" : index === 1 ? "1.5x" : "2x"}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          )}
         </View>
 
         <View style={styles.modeRow}>
-          <TouchableOpacity style={[styles.modeButton, scanMode === "scan" && styles.modeButtonActive]} onPress={() => { setScanMode("scan"); setCameraActive(true); }} disabled={locked}>
-            <Ionicons name="scan-outline" size={24} color={scanMode === "scan" ? "#70e884" : "#e7e7e7"} />
-            <Text style={[styles.modeText, scanMode === "scan" && styles.modeTextActive]}>SCAN</Text>
+          <TouchableOpacity style={[styles.modeButton, scanMode === "scan" && styles.modeButtonActive]} onPress={() => { setScanMode("scan"); setCameraReady(false); setCameraActive(false); setTimeout(() => setCameraActive(true), 250); }} disabled={locked}>
+            <Ionicons name="scan-outline" size={24} color={scanMode === "scan" ? "#70e884" : "#e7e7e7"} /><Text style={[styles.modeText, scanMode === "scan" && styles.modeTextActive]}>SCAN</Text>
           </TouchableOpacity>
           <TouchableOpacity style={[styles.modeButton, scanMode === "ocr" && styles.modeButtonActive]} onPress={openOcr} disabled={locked}>
-            <Ionicons name="scan-circle-outline" size={24} color="#e7e7e7" />
-            <Text style={styles.modeText}>OCR</Text>
+            <Ionicons name="scan-circle-outline" size={24} color={scanMode === "ocr" ? "#70e884" : "#e7e7e7"} /><Text style={[styles.modeText, scanMode === "ocr" && styles.modeTextActive]}>OCR</Text>
           </TouchableOpacity>
           <TouchableOpacity style={[styles.modeButton, scanMode === "search" && styles.modeButtonActive]} onPress={openSearch} disabled={locked}>
-            <Ionicons name="search-outline" size={24} color="#e7e7e7" />
-            <Text style={styles.modeText}>SEARCH</Text>
+            <Ionicons name="search-outline" size={24} color={scanMode === "search" ? "#70e884" : "#e7e7e7"} /><Text style={[styles.modeText, scanMode === "search" && styles.modeTextActive]}>SEARCH</Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle}>Items Added ({items.length})</Text>
-        <Text style={styles.sectionHint}>Newest items appear below</Text>
-      </View>
+      <View style={styles.sectionHeader}><Text style={styles.sectionTitle}>Items Added ({items.length})</Text><Text style={styles.sectionHint}>Newest items appear below</Text></View>
 
       <FlatList
         style={styles.itemList}
         data={items}
         keyExtractor={(item) => item.barcode}
-        renderItem={({ item, index }) => (
-          <InventoryItemRow
-            item={item}
-            index={index}
-            locked={locked}
-            onDecrease={() => void changeQuantity(item, -1)}
-            onIncrease={() => void changeQuantity(item, 1)}
-            onSetQuantity={() => openQuantityEditor(item)}
-          />
-        )}
-        ListEmptyComponent={
-          <View style={styles.emptyState}>
-            <Ionicons name="cube-outline" size={34} color="#4d4d4d" />
-            <Text style={styles.emptyTitle}>No items counted yet</Text>
-            <Text style={styles.emptyText}>Scan a barcode or use Search to add the first item.</Text>
-          </View>
-        }
-        ListFooterComponent={
-          <View style={styles.footer}>
-            {!locked && (
-              <TouchableOpacity style={styles.manualButton} onPress={openSearch}>
-                <Ionicons name="add" size={22} color="#071009" />
-                <Text style={styles.manualButtonText}>ADD MANUALLY</Text>
-              </TouchableOpacity>
-            )}
-            <TouchableOpacity style={[styles.completeButton, locked && styles.completeButtonDisabled]} onPress={handleCompleteInventory} disabled={locked}>
-              <Ionicons name={locked ? "lock-closed-outline" : "checkmark-circle-outline"} size={21} color={locked ? "#686868" : "#f4f4f4"} />
-              <Text style={[styles.completeButtonText, locked && styles.completeButtonTextDisabled]}>{locked ? "INVENTORY COMPLETED" : "COMPLETE INVENTORY"}</Text>
-            </TouchableOpacity>
-          </View>
-        }
+        renderItem={({ item, index }) => <InventoryItemRow item={item} index={index} locked={locked} onDecrease={() => void changeQuantity(item, -1)} onIncrease={() => void changeQuantity(item, 1)} onSetQuantity={() => openQuantityEditor(item)} />}
+        ListEmptyComponent={<View style={styles.emptyState}><Ionicons name="cube-outline" size={34} color="#4d4d4d" /><Text style={styles.emptyTitle}>No items counted yet</Text><Text style={styles.emptyText}>Scan a barcode, use OCR, or Search to add the first item.</Text></View>}
+        ListFooterComponent={<View style={styles.footer}>{!locked && <TouchableOpacity style={styles.manualButton} onPress={openSearch}><Ionicons name="add" size={22} color="#071009" /><Text style={styles.manualButtonText}>ADD MANUALLY</Text></TouchableOpacity>}<TouchableOpacity style={[styles.completeButton, locked && styles.completeButtonDisabled]} onPress={handleCompleteInventory} disabled={locked}><Ionicons name={locked ? "lock-closed-outline" : "checkmark-circle-outline"} size={21} color={locked ? "#686868" : "#f4f4f4"} /><Text style={[styles.completeButtonText, locked && styles.completeButtonTextDisabled]}>{locked ? "INVENTORY COMPLETED" : "COMPLETE INVENTORY"}</Text></TouchableOpacity></View>}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor="#70e884" />}
         contentContainerStyle={styles.listContent}
         showsVerticalScrollIndicator={false}
       />
 
-      <Modal visible={quantityItem !== null} transparent animationType="fade" onRequestClose={() => setQuantityItem(null)}>
-        <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Set Quantity</Text>
-            <Text style={styles.modalSubtitle} numberOfLines={1}>{quantityItem?.productName || quantityItem?.barcode}</Text>
-            <TextInput value={quantityInput} onChangeText={setQuantityInput} keyboardType="number-pad" autoFocus selectTextOnFocus style={styles.quantityInput} />
-            <View style={styles.modalActions}>
-              <TouchableOpacity style={styles.modalCancel} onPress={() => setQuantityItem(null)} disabled={savingQuantity}><Text style={styles.modalCancelText}>CANCEL</Text></TouchableOpacity>
-              <TouchableOpacity style={styles.modalSave} onPress={saveEditedQuantity} disabled={savingQuantity}><Text style={styles.modalSaveText}>{savingQuantity ? "SAVING..." : "SAVE"}</Text></TouchableOpacity>
-            </View>
+      <Modal visible={ocrVisible} transparent animationType="slide" onRequestClose={() => setOcrVisible(false)}>
+        <View style={styles.ocrBackdrop}>
+          <View style={styles.ocrSheet}>
+            <View style={styles.ocrHeader}><View style={{ flex: 1 }}><Text style={styles.modalTitle}>OCR Result</Text><Text style={styles.modalSubtitle}>Select a product if OCR could not make an exact code match.</Text></View><TouchableOpacity style={styles.closeButton} onPress={() => setOcrVisible(false)}><Ionicons name="close" size={24} color="#f2f2f2" /></TouchableOpacity></View>
+            <View style={styles.ocrTextBox}><Text style={styles.ocrLabel}>READ TEXT</Text><Text style={styles.ocrText}>{ocrText || "No text detected."}</Text></View>
+            <Text style={styles.ocrMatchesTitle}>PRODUCT MATCHES</Text>
+            {ocrResults.length === 0 ? <View style={styles.searchEmpty}><Ionicons name="alert-circle-outline" size={30} color="#777" /><Text style={styles.searchEmptyText}>No matching product found. Try again closer to the label.</Text></View> : <FlatList data={ocrResults} keyExtractor={(item) => String(item.id)} keyboardShouldPersistTaps="handled" renderItem={({ item }) => <TouchableOpacity style={styles.searchResult} onPress={() => void addOcrProduct(item)}><View style={styles.searchResultInfo}><Text style={styles.searchResultName} numberOfLines={1}>{item.productName}</Text><Text style={styles.searchResultMeta}>{item.productCode} • {item.barcode}</Text></View><View style={styles.addMatch}><Ionicons name="add" size={20} color="#071009" /><Text style={styles.addMatchText}>+1</Text></View></TouchableOpacity>} />}
+            <TouchableOpacity style={styles.retryOcrButton} onPress={() => setOcrVisible(false)}><Ionicons name="camera-outline" size={20} color="#e7e7e7" /><Text style={styles.retryOcrText}>BACK TO CAMERA</Text></TouchableOpacity>
           </View>
-        </KeyboardAvoidingView>
+        </View>
+      </Modal>
+
+      <Modal visible={quantityItem !== null} transparent animationType="fade" onRequestClose={() => setQuantityItem(null)}>
+        <KeyboardAvoidingView style={styles.modalBackdrop} behavior={Platform.OS === "ios" ? "padding" : undefined}><View style={styles.modalCard}><Text style={styles.modalTitle}>Set Quantity</Text><Text style={styles.modalSubtitle} numberOfLines={1}>{quantityItem?.productName || quantityItem?.barcode}</Text><TextInput value={quantityInput} onChangeText={setQuantityInput} keyboardType="number-pad" autoFocus selectTextOnFocus style={styles.quantityInput} /><View style={styles.modalActions}><TouchableOpacity style={styles.modalCancel} onPress={() => setQuantityItem(null)} disabled={savingQuantity}><Text style={styles.modalCancelText}>CANCEL</Text></TouchableOpacity><TouchableOpacity style={styles.modalSave} onPress={saveEditedQuantity} disabled={savingQuantity}><Text style={styles.modalSaveText}>{savingQuantity ? "SAVING..." : "SAVE"}</Text></TouchableOpacity></View></View></KeyboardAvoidingView>
       </Modal>
 
       <Modal visible={searchVisible} transparent animationType="slide" onRequestClose={closeSearch}>
-        <KeyboardAvoidingView style={styles.searchBackdrop} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-          <View style={styles.searchSheet}>
-            <View style={styles.searchHeader}>
-              <View>
-                <Text style={styles.modalTitle}>Find Product</Text>
-                <Text style={styles.modalSubtitle}>Code, name, or barcode</Text>
-              </View>
-              <TouchableOpacity style={styles.closeButton} onPress={closeSearch}><Ionicons name="close" size={24} color="#f2f2f2" /></TouchableOpacity>
-            </View>
-            <TextInput value={searchQuery} onChangeText={(value) => void runSearch(value)} placeholder="Search products..." placeholderTextColor="#666" autoFocus style={styles.searchInput} />
-            {searchLoading ? (
-              <View style={styles.searchEmpty}><Text style={styles.searchEmptyText}>Searching...</Text></View>
-            ) : searchResults.length === 0 ? (
-              <View style={styles.searchEmpty}><Ionicons name="search-outline" size={30} color="#555" /><Text style={styles.searchEmptyText}>{searchQuery ? "No matching products" : "Start typing to search"}</Text></View>
-            ) : (
-              <FlatList
-                data={searchResults}
-                keyExtractor={(item) => String(item.id)}
-                keyboardShouldPersistTaps="handled"
-                renderItem={({ item }) => (
-                  <TouchableOpacity style={styles.searchResult} onPress={() => void addProductFromSearch(item)}>
-                    <View style={styles.searchResultInfo}>
-                      <Text style={styles.searchResultName} numberOfLines={1}>{item.productName}</Text>
-                      <Text style={styles.searchResultMeta}>{item.productCode} • {item.barcode}</Text>
-                    </View>
-                    <Ionicons name="add-circle-outline" size={24} color="#70e884" />
-                  </TouchableOpacity>
-                )}
-                showsVerticalScrollIndicator={false}
-              />
-            )}
-          </View>
-        </KeyboardAvoidingView>
+        <KeyboardAvoidingView style={styles.searchBackdrop} behavior={Platform.OS === "ios" ? "padding" : undefined}><View style={styles.searchSheet}><View style={styles.searchHeader}><View><Text style={styles.modalTitle}>Find Product</Text><Text style={styles.modalSubtitle}>Code, name, or barcode</Text></View><TouchableOpacity style={styles.closeButton} onPress={closeSearch}><Ionicons name="close" size={24} color="#f2f2f2" /></TouchableOpacity></View><TextInput value={searchQuery} onChangeText={(value) => void runSearch(value)} placeholder="Search products..." placeholderTextColor="#666" autoFocus style={styles.searchInput} />{searchLoading ? <View style={styles.searchEmpty}><Text style={styles.searchEmptyText}>Searching...</Text></View> : searchResults.length === 0 ? <View style={styles.searchEmpty}><Ionicons name="search-outline" size={30} color="#555" /><Text style={styles.searchEmptyText}>{searchQuery ? "No matching products" : "Start typing to search"}</Text></View> : <FlatList data={searchResults} keyExtractor={(item) => String(item.id)} keyboardShouldPersistTaps="handled" renderItem={({ item }) => <TouchableOpacity style={styles.searchResult} onPress={() => void addProductFromSearch(item)}><View style={styles.searchResultInfo}><Text style={styles.searchResultName} numberOfLines={1}>{item.productName}</Text><Text style={styles.searchResultMeta}>{item.productCode} • {item.barcode}</Text></View><Ionicons name="add-circle-outline" size={24} color="#70e884" /></TouchableOpacity>} showsVerticalScrollIndicator={false} />}</View></KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
@@ -492,13 +505,17 @@ const styles = StyleSheet.create({
   lockedText: { color: "#ff8b8b", fontSize: 11, fontWeight: "800", letterSpacing: 1 },
   cameraSection: { flexShrink: 0 },
   cameraCard: { height: 250, marginHorizontal: 14, borderRadius: 18, overflow: "hidden", backgroundColor: "#171717", borderWidth: 1, borderColor: "#252525" },
-  cameraShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.16)" },
+  cameraShade: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.14)" },
   scanFrame: { position: "absolute", left: "12%", right: "12%", top: "28%", height: "40%", borderWidth: 2, borderColor: "rgba(255,255,255,0.9)", borderRadius: 14 },
+  cameraStatus: { position: "absolute", top: 12, alignSelf: "center", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 9, backgroundColor: "rgba(0,0,0,0.65)" },
+  cameraStatusText: { color: "#fff", fontSize: 10, fontWeight: "800", letterSpacing: 0.8 },
   zoomControl: { position: "absolute", bottom: 10, alignSelf: "center", flexDirection: "row", padding: 3, borderRadius: 10, backgroundColor: "rgba(0,0,0,0.72)" },
   zoomButton: { paddingHorizontal: 13, paddingVertical: 7, borderRadius: 8 },
   zoomButtonActive: { backgroundColor: "#17261b" },
   zoomText: { color: "#d8d8d8", fontSize: 13, fontWeight: "700" },
   zoomTextActive: { color: "#70e884" },
+  ocrCaptureButton: { position: "absolute", bottom: 10, alignSelf: "center", minHeight: 46, paddingHorizontal: 18, borderRadius: 12, backgroundColor: "#45c65a", alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 7 },
+  ocrCaptureText: { color: "#071009", fontSize: 13, fontWeight: "900", letterSpacing: 0.5 },
   modeRow: { marginHorizontal: 14, marginTop: 8, flexDirection: "row", gap: 8 },
   modeButton: { flex: 1, minHeight: 54, borderRadius: 12, backgroundColor: "#171717", borderWidth: 1, borderColor: "#242424", alignItems: "center", justifyContent: "center", gap: 2 },
   modeButtonActive: { backgroundColor: "#142219", borderColor: "#294d31" },
@@ -523,6 +540,17 @@ const styles = StyleSheet.create({
   permissionText: { color: "#777", textAlign: "center", lineHeight: 21, marginTop: 9, marginBottom: 22 },
   primaryButton: { backgroundColor: "#45c65a", paddingHorizontal: 26, paddingVertical: 14, borderRadius: 11 },
   primaryButtonText: { color: "#071009", fontWeight: "800" },
+  ocrBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.72)", justifyContent: "flex-end" },
+  ocrSheet: { maxHeight: "82%", minHeight: "58%", backgroundColor: "#111", borderTopLeftRadius: 24, borderTopRightRadius: 24, borderWidth: 1, borderColor: "#2a2a2a", padding: 18 },
+  ocrHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
+  ocrTextBox: { padding: 14, borderRadius: 13, backgroundColor: "#191919", borderWidth: 1, borderColor: "#292929", maxHeight: 110 },
+  ocrLabel: { color: "#70e884", fontSize: 10, fontWeight: "900", letterSpacing: 1 },
+  ocrText: { color: "#ddd", fontSize: 14, lineHeight: 20, marginTop: 6 },
+  ocrMatchesTitle: { color: "#777", fontSize: 11, fontWeight: "800", letterSpacing: 0.8, marginTop: 16, marginBottom: 5 },
+  addMatch: { minWidth: 48, height: 38, paddingHorizontal: 9, borderRadius: 10, backgroundColor: "#45c65a", alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 2 },
+  addMatchText: { color: "#071009", fontWeight: "900" },
+  retryOcrButton: { minHeight: 48, marginTop: 10, borderRadius: 11, backgroundColor: "#242424", borderWidth: 1, borderColor: "#383838", alignItems: "center", justifyContent: "center", flexDirection: "row", gap: 7 },
+  retryOcrText: { color: "#e7e7e7", fontSize: 13, fontWeight: "800" },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.72)", alignItems: "center", justifyContent: "center", padding: 20 },
   modalCard: { width: "100%", maxWidth: 420, borderRadius: 20, padding: 20, backgroundColor: "#191919", borderWidth: 1, borderColor: "#303030" },
   modalTitle: { color: "#f5f5f5", fontSize: 20, fontWeight: "800" },
@@ -539,8 +567,8 @@ const styles = StyleSheet.create({
   closeButton: { width: 42, height: 42, borderRadius: 21, backgroundColor: "#202020", alignItems: "center", justifyContent: "center" },
   searchInput: { height: 52, borderRadius: 12, borderWidth: 1, borderColor: "#303030", backgroundColor: "#191919", color: "#fff", paddingHorizontal: 15, fontSize: 16 },
   searchEmpty: { flex: 1, alignItems: "center", justifyContent: "center", paddingBottom: 60 },
-  searchEmptyText: { color: "#666", marginTop: 9 },
-  searchResult: { minHeight: 70, marginTop: 8, paddingHorizontal: 14, borderRadius: 13, backgroundColor: "#191919", borderWidth: 1, borderColor: "#292929", flexDirection: "row", alignItems: "center" },
+  searchEmptyText: { color: "#666", marginTop: 9, textAlign: "center", paddingHorizontal: 20 },
+  searchResult: { minHeight: 62, marginTop: 8, paddingHorizontal: 14, borderRadius: 13, backgroundColor: "#191919", borderWidth: 1, borderColor: "#292929", flexDirection: "row", alignItems: "center" },
   searchResultInfo: { flex: 1, minWidth: 0 },
   searchResultName: { color: "#f2f2f2", fontSize: 15, fontWeight: "700" },
   searchResultMeta: { color: "#777", fontSize: 12, marginTop: 5 },
