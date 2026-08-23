@@ -1,50 +1,45 @@
-# Welcome to your Expo app 👋
+# Inventory Counter
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Offline-first mobile inventory counting app built with Expo, React Native, Expo Router, and SQLite.
 
-## Get started
+## Core architecture
 
-1. Install dependencies
+- `app/` — routes and screens
+- `database/` — SQLite persistence, Excel parsing, and Excel export
+- `services/` — application/domain operations used by the UI
+- `types/` — shared inventory domain types
+- `constants/` — inventory rules and supported barcode formats
+- `utils/` — small domain utilities
+- `components/` — reusable UI components
+- `hooks/` — reusable React hooks
 
-   ```bash
-   npm install
-   ```
+## Inventory lifecycle
 
-2. Start the app
+1. Product master is imported from Excel.
+2. A single inventory session is created for the current calendar month (`YYYY-MM`).
+3. Barcode lookup resolves a product from the local SQLite product master.
+4. Counts are stored locally against the session and product.
+5. Quantity can be incremented, decremented, or explicitly set.
+6. Completing the session changes it to `completed` and prevents further count writes.
+7. Archive exposes completed sessions.
+8. Excel export contains the complete product master, including products with no count row; uncounted products therefore remain visible with quantity `0` and an empty count timestamp.
 
-   ```bash
-   npx expo start
-   ```
+## Data rules
 
-In the output, you'll find options to open the app in a
+- Product code is unique.
+- Barcode is unique.
+- A barcode cannot silently move to another product during import.
+- Quantity must be a non-negative integer.
+- Completed inventories are read-only.
+- Inventory data is local-first and does not require an internet connection.
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Development
 
 ```bash
-npm run reset-project
+npm install
+npm run typecheck
+npm run lint
+npx expo start
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+UI work is intentionally kept separate from the inventory/domain layer so the screens can be redesigned without changing the persistence rules.
