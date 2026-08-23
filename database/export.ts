@@ -15,6 +15,7 @@ export async function exportInventoryToExcel(
     'Product Name': row.productName,
     Barcode: row.barcode,
     Quantity: row.quantity,
+    'Counted': row.updatedAt ? 'Yes' : 'No',
     'Count Date': row.updatedAt
       ? new Date(row.updatedAt).toLocaleDateString()
       : '',
@@ -29,28 +30,20 @@ export async function exportInventoryToExcel(
     { wch: 30 },
     { wch: 18 },
     { wch: 12 },
+    { wch: 10 },
     { wch: 14 },
     { wch: 14 },
   ];
 
   const workbook = XLSX.utils.book_new();
-
-  XLSX.utils.book_append_sheet(
-    workbook,
-    worksheet,
-    'Inventory',
-  );
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Inventory');
 
   const base64 = XLSX.write(workbook, {
     type: 'base64',
     bookType: 'xlsx',
   });
 
-  const safeSessionName = sessionName.replace(
-    /[^a-zA-Z0-9-_]/g,
-    '_',
-  );
-
+  const safeSessionName = sessionName.replace(/[^a-zA-Z0-9-_]/g, '_');
   const fileName = `inventory-${safeSessionName}.xlsx`;
   const fileUri = `${FileSystem.cacheDirectory}${fileName}`;
 
@@ -61,14 +54,11 @@ export async function exportInventoryToExcel(
   const canShare = await Sharing.isAvailableAsync();
 
   if (!canShare) {
-    throw new Error(
-      'File sharing is not available on this device.',
-    );
+    throw new Error('File sharing is not available on this device.');
   }
 
   await Sharing.shareAsync(fileUri, {
-    mimeType:
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     dialogTitle: `Share ${fileName}`,
     UTI: 'com.microsoft.excel.xlsx',
   });
